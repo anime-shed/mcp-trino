@@ -102,15 +102,22 @@ func main() {
 		&mcp.StreamableHTTPOptions{DisableLocalhostProtection: true},
 	))
 
-	srv := &http.Server{Addr: httpAddr, Handler: mux}
+	srv := &http.Server{
+		Addr: httpAddr,
+		Handler: mux,
+		// mitigate Slowloris-style attacks (gosec G112)
+		ReadHeaderTimeout: 10 * time.Second,
+	}
 	go func() {
 		<-ctx.Done()
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
-		_ = srv.Shutdown(shutdownCtx)
+		if err := srv.Shutdown(shutdownCtx); err != nil {
+			log.Printf("Shutdown error: %v", err)
+		}
 	}()
 
-	log.Printf("Listening on %s (streamable HTTP)", httpAddr)
+	log.Print("Listening on MCP_HTTP_ADDR (streamable HTTP)")
 	if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		log.Fatalf("Server error: %v", err)
 	}
