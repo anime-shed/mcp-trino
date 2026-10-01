@@ -103,7 +103,7 @@ func main() {
 	))
 
 	srv := &http.Server{
-		Addr: httpAddr,
+		Addr:    httpAddr,
 		Handler: mux,
 		// mitigate Slowloris-style attacks (gosec G112)
 		ReadHeaderTimeout: 10 * time.Second,
