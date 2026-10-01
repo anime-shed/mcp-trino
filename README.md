@@ -51,6 +51,27 @@ mcp-trino is part of a broader suite of open-source MCP servers designed to work
 - **Enrich with Context**: Surface business metadata, ownership, and data quality
 - **Compose Custom Servers**: Import as a Go library with middleware and interceptors
 
+## HTTP Transport (MCP_HTTP_ADDR)
+
+This fork adds native Streamable HTTP transport (upstream is stdio-only). Set the
+`MCP_HTTP_ADDR` environment variable to serve MCP over HTTP instead of stdio:
+
+```bash
+MCP_HTTP_ADDR=":8080" mcp-trino
+```
+
+- MCP Streamable HTTP endpoint: `/` (all JSON-RPC traffic)
+- Health probe endpoint: `/healthz` (returns 200 OK)
+- Unset `MCP_HTTP_ADDR` → stdio transport, identical to upstream behavior
+
+Multi-cluster connections are configured via `TRINO_ADDITIONAL_SERVERS` (JSON array
+of connection objects, same shape as the default `TRINO_*` env vars — see
+[Multi-Cluster Connectivity](#multi-cluster-connectivity) below).
+
+Example Kubernetes deployment: `ghcr.io/anime-shed/mcp-trino:latest` with
+`MCP_HTTP_ADDR=:8080`, fronted by an nginx-ingress host. The image is built from
+this fork's GitHub Actions workflow (`release.yml`) with the `latest` tag only.
+
 ## Installation
 
 ### Homebrew (macOS)

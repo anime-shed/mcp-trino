@@ -19,9 +19,11 @@ package main
 import (
 	"context"
 	"log"
+	"net/http"
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
@@ -73,13 +75,44 @@ func main() {
 		defaultHost,
 	)
 
-	// Run server with stdio transport
-	if err := mcpServer.Run(ctx, &mcp.StdioTransport{}); err != nil {
-		if ctx.Err() != nil {
-			// Context canceled, normal shutdown
-			log.Println("Server stopped")
-			return
+	// Transport selection: MCP_HTTP_ADDR set -> StreamableHTTP server; unset -> stdio
+	// (keeps upstream stdio behavior as default for local/Claude Desktop use)
+	httpAddr := os.Getenv("MCP_HTTP_ADDR")
+	if httpAddr == "" {
+		// Run server with stdio transport
+		if err := mcpServer.Run(ctx, &mcp.StdioTransport{}); err != nil {
+			if ctx.Err() != nil {
+				// Context canceled, normal shutdown
+				log.Println("Server stopped")
+				return
+			}
+			log.Fatalf("Server error: %v", err)
 		}
+		return
+	}
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	})
+	// Stateless StreamableHTTP handler; localhost protection disabled so
+	// Kubernetes services / ingress can reach the endpoint
+	mux.Handle("/", mcp.NewStreamableHTTPHandler(
+		func(*http.Request) *mcp.Server { return mcpServer },
+		&mcp.StreamableHTTPOptions{DisableLocalhostProtection: true},
+	))
+
+	srv := &http.Server{Addr: httpAddr, Handler: mux}
+	go func() {
+		<-ctx.Done()
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		_ = srv.Shutdown(shutdownCtx)
+	}()
+
+	log.Printf("Listening on %s (streamable HTTP)", httpAddr)
+	if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		log.Fatalf("Server error: %v", err)
 	}
+	log.Println("Server stopped")
 }

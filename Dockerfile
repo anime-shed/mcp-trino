@@ -13,4 +13,7 @@ COPY linux/${TARGETARCH}/mcp-trino /usr/local/bin/mcp-trino
 RUN adduser -D -u 1000 mcp
 USER mcp
 
+# Streamable HTTP transport (set MCP_HTTP_ADDR, e.g. ":8080"); stdio when unset
+EXPOSE 8080
+
 ENTRYPOINT ["/usr/local/bin/mcp-trino"]

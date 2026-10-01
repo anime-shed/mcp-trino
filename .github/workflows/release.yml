@@ -1,9 +1,12 @@
 name: Release
 
+# Fork workflow: container-only build pushed to GHCR with the :latest tag.
+# Triggers on push to main (upstream goreleaser/cosign/homebrew steps removed).
+
 on:
   push:
-    tags:
-      - 'v*'
+    branches:
+      - main
 
 permissions: {}  # Restrict default token permissions
 
@@ -11,15 +14,11 @@ jobs:
   release:
     runs-on: ubuntu-latest
     permissions:
-      contents: write
+      contents: read
       packages: write
-      id-token: write  # Required for keyless signing with Cosign
-      attestations: write  # Required for GitHub attestations
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          fetch-depth: 0
 
       - name: Set up Go
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
@@ -27,13 +26,15 @@ jobs:
           go-version-file: go.mod
           cache: true
 
-      - name: Verify and prepare Go modules
+      # Dockerfile expects linux/${TARGETARCH}/mcp-trino in the build context
+      - name: Build linux/amd64 binary
+        env:
+          CGO_ENABLED: "0"
+          GOOS: linux
+          GOARCH: amd64
         run: |
-          go mod download
-          go mod verify
-
-      - name: Set up QEMU
-        uses: docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1 # v4.4.0
+          mkdir -p linux/amd64
+          go build -trimpath -ldflags "-s -w" -o linux/amd64/mcp-trino ./cmd/mcp-trino
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@594f3bf4285d9ea8dc53c9a0c9c4092420091003 # v4.4.0
@@ -45,113 +46,11 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Install Cosign
-        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
-
-      - name: Install Syft
-        uses: anchore/sbom-action/download-syft@3ad7283483fc7af8ff2b4ea19663c2d5ca935e26 # v0.24.2
-
-      - name: Verify Homebrew tap token
-        env:
-          HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
-        run: |
-          if [ -z "$HOMEBREW_TAP_TOKEN" ]; then
-            echo "ERROR: HOMEBREW_TAP_TOKEN secret is not set!"
-            exit 1
-          fi
-          echo "Token is set (length: ${#HOMEBREW_TAP_TOKEN} chars)"
-          # Test API access to homebrew-tap
-          HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" \
-            -H "Authorization: Bearer $HOMEBREW_TAP_TOKEN" \
-            -H "Accept: application/vnd.github+json" \
-            "https://api.github.com/repos/txn2/homebrew-tap")
-          echo "API response code: $HTTP_CODE"
-          if [ "$HTTP_CODE" != "200" ]; then
-            echo "ERROR: Token cannot access txn2/homebrew-tap (HTTP $HTTP_CODE)"
-            exit 1
-          fi
-          echo "Token verified - can access homebrew-tap"
-
-      - name: Run GoReleaser
-        uses: goreleaser/goreleaser-action@f06c13b6b1a9625abc9e6e439d9c05a8f2190e94 # v7.2.3
+      - name: Build and push container image (latest tag only)
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
-          distribution: goreleaser
-          version: "~> v2.13"
-          args: release --clean
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          HOMEBREW_TAP_GITHUB_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
-
-      - name: Build MCPB bundles
-        run: |
-          # Extract version from tag (remove 'v' prefix)
-          VERSION="${GITHUB_REF_NAME#v}"
-          ./mcpb/build.sh "$VERSION" --use-dist
-
-      - name: Sign MCPB bundles with Cosign
-        run: |
-          for mcpb in dist/mcpb/*.mcpb; do
-            echo "Signing $mcpb..."
-            cosign sign-blob --yes \
-              --bundle="${mcpb}.sigstore.json" \
-              "$mcpb"
-          done
-
-      - name: Upload MCPB bundles to release
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          # Upload each .mcpb file and its signature to the release
-          for mcpb in dist/mcpb/*.mcpb; do
-            echo "Uploading $mcpb..."
-            gh release upload "$GITHUB_REF_NAME" "$mcpb" --clobber
-            gh release upload "$GITHUB_REF_NAME" "${mcpb}.sigstore.json" --clobber
-          done
-
-      - name: Install mcp-publisher
-        run: |
-          curl -L "https://github.com/modelcontextprotocol/registry/releases/latest/download/mcp-publisher_linux_amd64.tar.gz" | tar xz
-          sudo mv mcp-publisher /usr/local/bin/
-
-      - name: Prepare server.json for MCP Registry
-        run: |
-          VERSION="${GITHUB_REF_NAME#v}"
-
-          # Calculate SHA-256 hashes for each MCPB bundle (using underscore naming convention)
-          SHA_DARWIN_ARM64=$(sha256sum dist/mcpb/mcp-trino_${VERSION}_darwin_arm64.mcpb | cut -d' ' -f1)
-          SHA_DARWIN_AMD64=$(sha256sum dist/mcpb/mcp-trino_${VERSION}_darwin_amd64.mcpb | cut -d' ' -f1)
-          SHA_WINDOWS_AMD64=$(sha256sum dist/mcpb/mcp-trino_${VERSION}_windows_amd64.mcpb | cut -d' ' -f1)
-
-          # Update server.json with version and SHA-256 hashes
-          sed -i "s/0.0.0/${VERSION}/g" server.json
-          sed -i "s/mcp-trino_0.0.0_darwin_arm64.mcpb/mcp-trino_${VERSION}_darwin_arm64.mcpb/" server.json
-          sed -i "s/mcp-trino_0.0.0_darwin_amd64.mcpb/mcp-trino_${VERSION}_darwin_amd64.mcpb/" server.json
-          sed -i "s/mcp-trino_0.0.0_windows_amd64.mcpb/mcp-trino_${VERSION}_windows_amd64.mcpb/" server.json
-
-          # Replace placeholder hashes (in order: arm64, amd64, windows)
-          sed -i "0,/PLACEHOLDER_SHA256/{s/PLACEHOLDER_SHA256/${SHA_DARWIN_ARM64}/}" server.json
-          sed -i "0,/PLACEHOLDER_SHA256/{s/PLACEHOLDER_SHA256/${SHA_DARWIN_AMD64}/}" server.json
-          sed -i "0,/PLACEHOLDER_SHA256/{s/PLACEHOLDER_SHA256/${SHA_WINDOWS_AMD64}/}" server.json
-
-          echo "Updated server.json:"
-          cat server.json
-
-      - name: Publish to MCP Registry
-        continue-on-error: true  # Don't fail if version already exists
-        run: |
-          # Login using GitHub OIDC (id-token: write permission required)
-          mcp-publisher login github-oidc
-
-          # Publish the server to the MCP registry
-          mcp-publisher publish
-
-      - name: Publish release
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          gh release edit "$GITHUB_REF_NAME" --draft=false
-
-  # NOTE: SLSA provenance job removed due to false positive "private repository" detection
-  # See: https://github.com/slsa-framework/slsa-github-generator/issues
-  # The workflow incorrectly detects public repos as private and halts.
-  # Re-add when the upstream bug is fixed.
+          context: .
+          file: Dockerfile
+          platforms: linux/amd64
+          push: true
+          tags: ghcr.io/${{ github.repository }}:latest
